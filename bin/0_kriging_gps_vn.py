@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 #####################
 # Applying the PyKrige package to interpolate point data into surface data.
 # Qi Ou, University of Leeds
@@ -6,16 +8,78 @@
 
 import geopandas as gpd
 import shapely.speedups
-gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
-shapely.speedups.enable()
+# gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+# shapely.speedups.enable()
 from pykrige.uk import UniversalKriging
 from pykrige.kriging_tools import write_asc_grid
 from matplotlib import cm
 import numpy as np
 import itertools
+import matplotlib
+matplotlib.use('Agg')  # Use non-GUI backend
 import matplotlib.pyplot as plt
 from shapely.geometry import Point, Polygon
+import pandas as pd
+import argparse
+import os
+import subprocess
 
+def load_and_prepare_gps(ahb_2d_path, ahb_3d_path, lon_min, lon_max, lat_min, lat_max, sn_threshold=1.0):
+    """
+    Load GNSS 2D and 3D data from compiled GNSS C.Rollins, filter by bounding box, clean and return a GeoDataFrame.
+    
+    Parameters:
+    - ahb_2d_path (str): Path to 2D GNSS dataset
+    - ahb_3d_path (str): Path to 3D GNSS dataset
+    - lon_min, lon_max, lat_min, lat_max (float): Bounding box for region of interest
+    
+    Returns:
+    - gps (GeoDataFrame): Cleaned and filtered GPS data ready for kriging
+    """
+    
+    # Load datasets
+    GNSS_AHB_2D_nnr = pd.read_csv(ahb_2d_path, delim_whitespace=True)
+    GNSS_AHB_3D_nnr = pd.read_csv(ahb_3d_path, delim_whitespace=True)
+    
+    # Filter by bounding box
+    df_TR_3D = GNSS_AHB_3D_nnr[
+        (GNSS_AHB_3D_nnr['lon'] >= lon_min) &
+        (GNSS_AHB_3D_nnr['lon'] <= lon_max) &
+        (GNSS_AHB_3D_nnr['lat'] >= lat_min) &
+        (GNSS_AHB_3D_nnr['lat'] <= lat_max)
+    ]
+    
+    df_TR_2D = GNSS_AHB_2D_nnr[
+        (GNSS_AHB_2D_nnr['lon'] >= lon_min) &
+        (GNSS_AHB_2D_nnr['lon'] <= lon_max) &
+        (GNSS_AHB_2D_nnr['lat'] >= lat_min) &
+        (GNSS_AHB_2D_nnr['lat'] <= lat_max)
+    ]
+    
+    # Combine both
+    df = pd.concat([df_TR_3D, df_TR_2D], ignore_index=True)
+    
+    # Drop rows where sn > threshold
+    df = df[df['snorth'] <= sn_threshold]
+    
+    # Prepare required columns
+    df['station'] = df['names'] if 'names' in df.columns else ['STN_{:03d}'.format(i) for i in range(len(df))]
+    
+    df['ve'] = df['veast_eu']
+    df['vn'] = df['vnorth_eu']
+    df['vu'] = df.get('vup', 0.0)
+    
+    df['se'] = df['seast']
+    df['sn'] = df['snorth']
+    df['su'] = df.get('sup', 0.0)
+    
+    df['cen'] = 0.0
+    df['geometry'] = df.apply(lambda row: Point(row['lon'], row['lat']), axis=1)
+    
+    gps = gpd.GeoDataFrame(df, geometry='geometry', crs='EPSG:4326')
+    gps = gps[['station', 've', 'vn', 'vu', 'se', 'sn', 'su', 'cen', 'geometry']]
+    
+    return gps
 
 def polyfit2d(x, y, z, order=3):
     """
@@ -76,7 +140,7 @@ def grid_gps_with_external_drift(gps_df, gridx, gridy, comp, zz):
         variogram_model=model,
         weight=True,
         nlags=20,
-        enable_plotting=True,
+        enable_plotting=False,
         # exact_values=False
         # coordinates_type="geographic"  # not yet implemented for universal kriging
     )
@@ -163,9 +227,7 @@ def grid_gps_with_specified_drift(gps_df, gridx, gridy, comp, m):
 
     return vel_interpolated, np.sqrt(var_interpolated)
 
-
-
-def grid_gps(gps_df, gridx, gridy, comp):
+def grid_gps(gps_df, gridx, gridy, comp, out_dir, method="external_drift"):
     """
     Kriging process
     @param gps_df: GPS dataframe
@@ -181,27 +243,34 @@ def grid_gps(gps_df, gridx, gridy, comp):
 
     # Plot polynomial fit to data points for universal kriging
     fit, ax = plt.subplots()
-    im = ax.imshow(zz, extent=(west, east, south, north), origin='lower', vmin=vel_vmin, vmax=vel_vmax)
-    gps_df.plot(comp, ax=ax, vmin=vel_vmin, vmax=vel_vmax, edgecolor="w")
+    im = ax.imshow(zz, extent=(west, east, south, north), origin='lower', vmin=vel_vmin, vmax=vel_vmax, cmap='RdBu_r')
+    gps_df.plot(comp, ax=ax, vmin=vel_vmin, vmax=vel_vmax, edgecolor="w", cmap='RdBu_r')
     plt.colorbar(im, ax=ax)
     ax.set_xlim((west, east))
     ax.set_ylim((south, north))
     # ascending.plot(ax=ax, facecolor='None', edgecolor='w', alpha=1)  #facecolor='red',
     # descending.plot(ax=ax, facecolor='None', edgecolor='w', alpha=1)  #facecolor='blue',
     ax.set_title("Polynomial Surface Fit as Drift")
-    plt.show()
-
-    vel_interpolated, sig_interpolated = grid_gps_with_external_drift(gps_df, gridx, gridy, comp, zz)
-    # vel_interpolated, sig_interpolated = grid_gps_from_detrended_gps_points(gps_df, gridx, gridy, comp, zz, m)
-    # vel_interpolated, sig_interpolated = grid_gps_with_specified_drift(gps_df, gridx, gridy, comp, m)
+    plt.savefig(f'{out_dir}/polynomial_surface_fit.png')
+    plt.close()
+    
+    if method == "external_drift":
+        vel_interpolated, sig_interpolated = grid_gps_with_external_drift(gps_df, gridx, gridy, comp, zz)
+    elif method == "detrended":
+        vel_interpolated, sig_interpolated = grid_gps_from_detrended_gps_points(gps_df, gridx, gridy, comp, zz, m)
+    elif method == "specified_drift":
+        vel_interpolated, sig_interpolated = grid_gps_with_specified_drift(gps_df, gridx, gridy, comp, m)
+    else:
+        raise ValueError(f"Unknown interpolation method: {method}")
+    
     return vel_interpolated, sig_interpolated
 
 
-def plot_interpolation(vel_interpolated, sig_interpolated):
+def plot_interpolation(vel_interpolated, sig_interpolated, out_dir):
     """ Plot the interpolated velocity and uncertainty maps """
     # plot vel_interpolated
     fig, ax = plt.subplots(2, figsize=(4.4, 6), sharex='all')
-    im = ax[0].imshow(vel_interpolated, extent=(west, east, south, north), origin='lower', vmin=vel_vmin, vmax=vel_vmax)  # , cmap=cm.bwr
+    im = ax[0].imshow(vel_interpolated, extent=(west, east, south, north), origin='lower', vmin=vel_vmin, vmax=vel_vmax, cmap='RdBu_r')  # , cmap=cm.bwr
     # gps.plot(ax=ax[0], facecolor="None", edgecolor='w') # to see GNSS location on interpolated field
     # gps[gps['sn']>0.7].plot(facecolor='None', edgecolor='r', ax=ax[0,0]) # to highlight GNSS with large uncertainties and see if they are causing local artefacts
     plt.colorbar(im, ax=ax[0], label="mm/yr")
@@ -223,7 +292,8 @@ def plot_interpolation(vel_interpolated, sig_interpolated):
     # ascending.plot(ax=ax[1], facecolor='None', edgecolor='red', alpha=1)
     # descending.plot(ax=ax[1], facecolor='None', edgecolor='blue', alpha=1)
 
-    plt.show()
+    plt.savefig(f'{out_dir}/kriging_interpolation_v{component}.png', dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 def monte_carlo_interpolation(gps, num):
@@ -247,36 +317,6 @@ def monte_carlo_interpolation(gps, num):
         write_asc_grid(gridx, gridy, vel_interpolated, filename=out_dir+"v{}_interpolated_monte_carlo_{}.grd".format(component, i))
 
 
-def prepare_clean_gps(west, east, south, north, culling_thresh=0.7):
-    """ Perform data culling and plot the culling outcome to
-    check if there are GPS data with large sigma mixed in with good GPS.
-    Remove bad GPS with an adjustable threshold sigma called culling_thresh  """
-
-    # load gps in the box extent for kriging, needs to be larger than InSAR coverage
-    all_gps = load_wang_liang('_Eurasia')
-    # all_gps = load_chris()
-    map_box = Polygon([(west, south), (east, south), (east, north), (west, north)])
-    gps_in_box = all_gps[all_gps.within(map_box)]
-
-    # data culling, get rid of contradictory clustering values by removing data with high uncertainties
-    gps = gps_in_box[gps_in_box[sig] <= culling_thresh]
-
-    # define vmin vmax
-    sig_vmin = 0
-    sig_vmax = 2
-    vel_vmin = np.nanpercentile(gps[vel], 1)
-    vel_vmax = np.nanpercentile(gps[vel], 99)
-
-    # plotting data culling
-    fig, ax = plt.subplots()
-    gps.sort_values(sig).plot(sig, ax=ax, legend=True, vmin=sig_vmin, vmax=sig_vmax)
-    gps[gps[sig] > culling_thresh].plot(sig, edgecolor='r', ax=ax, vmin=sig_vmin, vmax=sig_vmax)
-    ax.set_title('GNSS Sigma V{} (mm/yr) , red=({}>{})'.format(component, sig, culling_thresh))
-    plt.show()
-
-    return gps, sig_vmin, sig_vmax, vel_vmin, vel_vmax
-
-
 def load_frames(frame_file):
     """ load kml frames into a polygon geopandas dataframe
     Only for plotting in this script, not essential """
@@ -292,118 +332,138 @@ def load_frames(frame_file):
     return ascending, descending
 
 
-def load_wang_liang(reference):
-    """ Load GPS data into a geopandas dataframe
-    - I needed to combine GPS velocities from two publications
-    - this section could be much simpler if using GPS from just one publication
-    - only need lon, lat, vel and sig for the purpose of interpolation"""
-    gps_gdf = gpd.GeoDataFrame(crs="EPSG:4326")
-    gps_gdf['geometry'] = None
-    index = 0
-    wang = '/Users/qi/OneDrive/WFH/insar/GPS/Wang_Shen_2020_GPS_JGR/Table.S4_results'
-    fl = open(wang, "r").readlines()
-    for line in fl:
-        if not line.startswith(('*', "Table")):
-            sta, lon, lat, Ve_I, Ve_E, dVe, Vn_I, Vn_E, dVn, Cen = line.split()
-            gps_gdf.loc[index, 'geometry'] = Point(float(lon), float(lat))
-            gps_gdf.loc[index, 'station'] = sta[:4]
-            if reference == '_Eurasia':
-                gps_gdf.loc[index, 've'] = float(Ve_E)  # eastern velocity in mm/yr in fixed eurasia reference frame
-                gps_gdf.loc[index, 'vn'] = float(Vn_E)  # northern velocity in mm/yr in fixed eurasia reference frame
-            elif reference == '_ITRF2008':
-                gps_gdf.loc[index, 've'] = float(Ve_I)  # eastern velocity in mm/yr in ITRF20082008 reference frame
-                gps_gdf.loc[index, 'vn'] = float(Vn_I)  # northern velocity in mm/yr in ITRF20082008 reference frame
-            else:
-                raise ValueError('reference has to be _Eurasia or _ITRF2008')
-            gps_gdf.loc[index, 'se'] = float(dVe)  # sigma ve
-            gps_gdf.loc[index, 'sn'] = float(dVn)  # sigma vn
-            gps_gdf.loc[index, 'cen'] = float(Cen)  # correlation between east and northern velocities
-            gps_gdf.loc[index, 'vu'] = float(0)  # up velocity in mm/yr in ITRF20082008 reference frame
-            gps_gdf.loc[index, 'su'] = float(0)  # sigma vu in ITRF20082008 reference frame
-            index += 1
-
-    liang = '/Users/qi/OneDrive/WFH/insar/GPS/Liang_etal_2013_supporting/GPS_Liang_etal_2013.csv'
-    fl = open(liang, "r").readlines()
-    for line in fl:
-        if not line.startswith(('*', "Sta.", ",", " Eurasia", " ITRF2008")):
-            sta, lon, lat, VN, σvN, VE, σvE, CNE, VU, σvU, Vu, σvu = line.split(',')
-            if VU != '-':  # only input vertical if Liang as a vertical value
-                if sta in gps_gdf['station'].values:  # only input vertical if Wang has the same station
-                    index = gps_gdf.index[gps_gdf['station'] == sta].tolist()[0]  # get index in dataframe based on station
-                    if reference == '_Eurasia':
-                        gps_gdf.loc[index, 'vu'] = float(Vu)  # up velocity in mm/yr relative to stable northern neighbour
-                        gps_gdf.loc[index, 'su'] = float(σvu)  # sigma vu relative to stable northern neighbour
-                    elif reference == '_ITRF2008':
-                        gps_gdf.loc[index, 'vu'] = float(VU)  # up velocity in mm/yr in ITRF2008 reference frame
-                        gps_gdf.loc[index, 'su'] = float(σvU)  # sigma vu in ITRF20082008 reference frame
-    return gps_gdf
-
 
 if __name__ == "__main__":
-    ##########################
-    #      Define inputs     #
-    ##########################
+    # ----------------------------
+    # Parse user arguments
+    # ----------------------------
+    parser = argparse.ArgumentParser(description="GPS Kriging with PyKrige")
 
-    # define sampling resolution in degree
-    res = 0.2
+    parser.add_argument("--region", type=float, nargs=4, metavar=("LON_MIN", "LON_MAX", "LAT_MIN", "LAT_MAX"),
+                        default=[31.5, 45, 32, 43],
+                        help="Region bounding box: lon_min lon_max lat_min lat_max")
 
-    # define map extent with longitude and latitude in degrees
-    west = 60
-    east = 96
-    south = 34
-    north = 53
+    parser.add_argument("--2d_path", type=str, required=True,
+                        help="Path to GNSS AHB 2D data file")
+
+    parser.add_argument("--3d_path", type=str, required=True,
+                        help="Path to GNSS AHB 3D data file")
+
+    parser.add_argument("--res", type=float, default=0.2,
+                        help="Grid resolution in degrees")
+
+    parser.add_argument("--out_dir", type=str, default="gps_kriging",
+                        help="Output directory name")
+    parser.add_argument("--method", type=str, choices=["external_drift", "detrended", "specified_drift"],
+                        default="external_drift",
+                        help="Kriging interpolation method to use (default: external_drift)")
 
 
-    # define component name
+    args = parser.parse_args()
+
+    # ----------------------------
+    # Assign inputs from args
+    # ----------------------------
+    lon_min, lon_max, lat_min, lat_max = args.region
+    ahb_2d_path = args.__dict__['2d_path']
+    ahb_3d_path = args.__dict__['3d_path']
+    res = args.res
+    method = args.method
+    
+    # Final output directory includes method
+    out_dir = os.path.join(args.out_dir, method)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # For plotting and grid
+    west, east, south, north = lon_min, lon_max, lat_min, lat_max
+
+    # ----------------------------
+    # Load GPS data
+    # ----------------------------
+    print("Loading GPS and performing data culling ...")
+    gps = load_and_prepare_gps(ahb_2d_path, ahb_3d_path, lon_min, lon_max, lat_min, lat_max)
+
+    # ----------------------------
+    # Prepare velocity component
+    # ----------------------------
     component = 'n'
+    vel = f'v{component}'
+    sig = f's{component}'
 
-    # define data culling threshold
-    cleaning_threshold = 1  # gps sigma Vn in mm/yr => only Vn with lower uncertainties are used for kriging.
+    vel_vmin = gps[vel].quantile(0.01)
+    vel_vmax = gps[vel].quantile(0.99)
+    sig_vmin = 0
+    sig_vmax = 2
 
-    # define output directory
-    out_dir = "../gps/"
 
-    ##########################
-    #      Loading data      #
-    ##########################
-
-    # import frame polygons which is only used for plotting
-    # frame_file = '/Users/qi/OneDrive/WFH/insar/GPS/gmt/kml/qinghai_frames.kml'
-    # ascending, descending = load_frames(frame_file)
-
-    # load gps and perform data culling
-    print("load gps and perform data culling")
-    sig = 's{}'.format(component)  # only used for data culling, not for weighting interpolation
-    vel = 'v{}'.format(component)  # used for kriging interpolation
-    # the function prepare_clean_gps calls the function load_wang_liang for loading gps from two sources,
-    # feel free to modify the loading commands to suit your use case
-    gps, sig_vmin, sig_vmax, vel_vmin, vel_vmax = prepare_clean_gps(west, east, south, north, cleaning_threshold)
-
-    ##########################
-    #         Kriging        #
-    ##########################
-
-    # Kriging
+    # ----------------------------
+    # Grid generation
+    # ----------------------------
     print("Kriging starts ... ")
-    gridx = np.arange(west, east+res, res)
-    gridy = np.arange(south, north+res, res)
-    vel_interpolated, sig_interpolated = grid_gps(gps, gridx, gridy, vel)
+    gridx = np.arange(west, east + res, res)
+    gridy = np.arange(south, north + res, res)
 
-    # plot kriging results
+    vel_interpolated, sig_interpolated = grid_gps(gps, gridx, gridy, vel, out_dir)
+
+    # ----------------------------
+    # Plot results
+    # ----------------------------
     print("Plot Kriging Results ... ")
-    plot_interpolation(vel_interpolated, sig_interpolated)
+    plot_interpolation(vel_interpolated, sig_interpolated, out_dir)
 
-    # write data to file
+    # ----------------------------
+    # Save results
+    # ----------------------------
     print("Saving Kriging Results ... ")
-    write_asc_grid(gridx, gridy, vel_interpolated, filename=out_dir+"{}_interpolated.grd".format(vel))
-    write_asc_grid(gridx, gridy, sig_interpolated, filename=out_dir+"{}_interpolated.grd".format(sig))
+    write_asc_grid(gridx, gridy, vel_interpolated, filename=f"{out_dir}/{vel}_interpolated.grd")
+    write_asc_grid(gridx, gridy, sig_interpolated, filename=f"{out_dir}/{sig}_interpolated.grd")
+    
+
+    # ----------------------------
+    # Upsample and convert to GeoTIFF
+    # ----------------------------
+
+    print("Converting .grd to GeoTIFF and upsampling both velocity and sigma...")
+
+    # File paths
+    vel_grd = f"{out_dir}/{vel}_interpolated.grd"
+    sig_grd = f"{out_dir}/{sig}_interpolated.grd"
+
+    vel_tif = f"{out_dir}/{vel}_interpolated.tif"
+    sig_tif = f"{out_dir}/{sig}_interpolated.tif"
+
+    vel_tif_upsampled = f"{out_dir}/{vel}_interpolated_upsampled.tif"
+    sig_tif_upsampled = f"{out_dir}/{sig}_interpolated_upsampled.tif"
+
+    # Convert .grd to .tif
+    subprocess.run(["gdal_translate", "-of", "GTiff", vel_grd, vel_tif], check=True)
+    subprocess.run(["gdal_translate", "-of", "GTiff", sig_grd, sig_tif], check=True)
+
+    # Upsample .tif to 0.01 deg resolution using bilinear interpolation
+    subprocess.run([
+        "gdalwarp",
+        "-tr", "0.01", "0.01",
+        "-r", "bilinear",
+        vel_tif,
+        vel_tif_upsampled
+    ], check=True)
+
+    subprocess.run([
+        "gdalwarp",
+        "-tr", "0.01", "0.01",
+        "-r", "bilinear",
+        sig_tif,
+        sig_tif_upsampled
+    ], check=True)
+
+    print("Conversion and upsampling completed successfully.")
 
 
-    #################################################
-    #   For evaluating uncertainties in             #
-    #   gradients of interpolated velocity field    #
-    #################################################
+    # #################################################
+    # #   For evaluating uncertainties in             #
+    # #   gradients of interpolated velocity field    #
+    # #################################################
 
-    # # monte carlo  - generate many interpolated fields for uncertainty analysis which I later performed in GMT
-    # print("Running Monte Carlo to interpolate from many perturbed GPS ... ")
-    # monte_carlo_interpolation(gps, 100)
+    # # # monte carlo  - generate many interpolated fields for uncertainty analysis which I later performed in GMT
+    # # print("Running Monte Carlo to interpolate from many perturbed GPS ... ")
+    # # monte_carlo_interpolation(gps, 100)
