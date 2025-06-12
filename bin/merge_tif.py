@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
+
 import glob
 import os
 import re
-import gdal
+from osgeo import gdal
 import numpy as np
 import seaborn as sns
 from matplotlib import pyplot as plt
@@ -12,7 +14,6 @@ gdal.UseExceptions()
 from cmcrameri import cm
 import copy
 import shutil
-import gdal
 from pathlib import Path
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)

@@ -22,35 +22,54 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger('decomposition.log')
 
 
-def load_los_sigma_neu(group_dic, track_list):
-    ##########################################################################
-    # Loading input LOS, Sigma and coefs N, E, U into a dictionary of tracks.#
-    # Manually define file directories and suffix here.                      #
-    ##########################################################################
-
+def load_los_sigma_neu(group_dic, track_list, use_sboi=False):
     for track in track_list:
-        if NEU:
-            print(los_dir + los_prefix + track + '/' +track +los_suffix)
-            group_dic[track] = OpenTif(los_dir + los_prefix + track +'/'+ track + los_suffix,
-                                       sigfile=sigma_dir + sigma_preffix + track +'/'+ track + sigma_suffix,
-                                       N=angle_dir + N_prefix + track +'/'+ track + N_suffix,
-                                       E=angle_dir + E_prefix + track +'/'+ track + E_suffix,
-                                       U=angle_dir + U_prefix + track +'/'+ track + U_suffix)
+        if use_sboi:
+            curr_dir = sboi_dir
+            curr_prefix = sboi_prefix
+            curr_suffix = sboi_suffix
+            curr_sigma_dir = sboi_sigma_dir
+            curr_sigma_prefix = sboi_sigma_preffix
+            curr_sigma_suffix = sboi_sigma_suffix
+            curr_angle_dir = sboi_dir
+            N_pref, N_suff = sboi_N_prefix, sboi_N_suffix
+            E_pref, E_suff = sboi_E_prefix, sboi_E_suffix
+            U_pref, U_suff = sboi_U_prefix, sboi_U_suffix
         else:
-            group_dic[track] = OpenTif(los_dir + los_prefix + track + los_suffix,
-                                       sigfile=sigma_dir + sigma_preffix + track + sigma_suffix,
-                                       incidence=angle_dir + inc_prefix + track + inc_suffix,
-                                       heading=angle_dir + head_prefix + track + head_suffix,
-                                       N=angle_dir + N_prefix + track + N_suffix)
+            curr_dir = los_dir
+            curr_prefix = los_prefix
+            curr_suffix = los_suffix
+            curr_sigma_dir = los_sigma_dir
+            curr_sigma_prefix = los_sigma_preffix
+            curr_sigma_suffix = los_sigma_suffix
+            curr_angle_dir = angle_dir
+            N_pref, N_suff = los_N_prefix, los_N_suffix
+            E_pref, E_suff = los_E_prefix, los_E_suffix
+            U_pref, U_suff = los_U_prefix, los_U_suffix
 
-        if flip_sign:
-            group_dic[track].data = group_dic[track].data * -1
+        filepath = os.path.join(curr_dir, curr_prefix + track, track + curr_suffix)
+        print(f"Loading: {filepath}")
+        try:
+            group_dic[track] = OpenTif(
+                filepath,
+                sigfile=os.path.join(curr_sigma_dir, curr_sigma_prefix + track, track + curr_sigma_suffix),
+                N=os.path.join(curr_angle_dir, N_pref + track, track + N_suff),
+                E=os.path.join(curr_angle_dir, E_pref + track, track + E_suff),
+                U=os.path.join(curr_angle_dir, U_pref + track, track + U_suff),
+            )
 
-        if constant_los_sig:
-            if track == 'A1' or track == 'A2':
-                group_dic[track].sigma = ~np.isnan(group_dic[track].sigma) * asc_sig
-            if track == 'D1' or track == 'D2':
-                group_dic[track].sigma = ~np.isnan(group_dic[track].sigma) * dsc_sig
+            if flip_sign:
+                group_dic[track].data = group_dic[track].data * -1
+
+            if constant_los_sig:
+                if track in ['A1', 'A2']:
+                    group_dic[track].sigma = ~np.isnan(group_dic[track].sigma) * asc_sig
+                if track in ['D1', 'D2']:
+                    group_dic[track].sigma = ~np.isnan(group_dic[track].sigma) * dsc_sig
+
+        except Exception as e:
+            print(f" Warning: Failed to load track '{track}': {e}")
+            continue
 
 
 class Raster(object):
@@ -91,8 +110,8 @@ def remove_vn_contribution_from_los_and_propagate_sigma_n_to_sigma_los(gp, vn):
         gp[i].sigma = np.sqrt(np.power(gp[i].sigma, 2) + np.power(vn_overlap.d2sigma * gp[i].N, 2))
 
 
-def define_map_size(vn, asc_0, asc_1, dsc_0, dsc_1):
-    """ Define size of the big raster grid, big enough to host all Vn and LOS tracks."""
+def define_map_size(vn, asc_0, asc_1, dsc_0, dsc_1, sboi_asc_0, sboi_asc_1, sboi_dsc_0, sboi_dsc_1):
+    """ Define size of the big raster grid, big enough to host all Vn and LOS and SBOI tracks."""
     left = []
     right = []
     top = []
@@ -107,7 +126,7 @@ def define_map_size(vn, asc_0, asc_1, dsc_0, dsc_1):
     xres.append(vn.xres)
     yres.append(vn.yres)
 
-    for group in [asc_0, asc_1, dsc_0, dsc_1]:
+    for group in [asc_0, asc_1, dsc_0, dsc_1, sboi_asc_0, sboi_asc_1, sboi_dsc_0, sboi_dsc_1]:
         for track in group:
             # print(track)
             left.append(group[track].left)
@@ -124,6 +143,14 @@ def define_map_size(vn, asc_0, asc_1, dsc_0, dsc_1):
     logger.info("define the geographic boundary of the map")
     big_map = Raster(north=max(top), south=min(bottom), west=min(left), east=max(right), x_step=xres[0], y_step=yres[0])
     return big_map
+
+def must_have(group_list, at_least=1):
+    "list_of_group_lists = must have all of [[must have one], [must have one], [must have one]]"
+    must_have = np.zeros(group_list[0].flatten().size)
+    for gp in group_list:
+        must_have += ~np.isnan(gp.flatten())
+    return must_have >= at_least
+
 
 
 def focus_to_content(array, raster):
@@ -144,18 +171,31 @@ def focus_to_content(array, raster):
 
 
 
-def input_track_los_sigma_E_U_to_map(gp, los_map, sig_map, E_map, U_map, maps):
-    """ Add los, sig, E and U data from each group into four raster layers of size defined by maps. """
+def input_track_los_sigma_N_E_U_to_map(gp, los_map, sig_map, N_map, E_map, U_map, maps, plotting=False):
+    """ Add los, sig, N, E and U data from each group into four raster layers of size defined by maps. """
     print("input_track_los_sigma_E_U_to_map")
     for i in gp:
-        print(i)
         x_shift = int((gp[i].left - maps.left) / maps.xres + 0.5)
         y_shift = int((gp[i].top - maps.top) / maps.yres + 0.5)
         #nodata_test = np.isnan(gp[i].data)  # = True if nan, = False if not nan; True = 1, False = 0
         non_nan_merge(los_map, gp[i].data, np.isnan(gp[i].data), x_shift, y_shift, gp[i].xsize, gp[i].ysize)
         non_nan_merge(sig_map, gp[i].sigma, np.isnan(gp[i].sigma), x_shift, y_shift, gp[i].xsize, gp[i].ysize)
+        non_nan_merge(N_map, gp[i].N, np.isnan(gp[i].N), x_shift, y_shift, gp[i].xsize, gp[i].ysize)
         non_nan_merge(E_map, gp[i].E, np.isnan(gp[i].E), x_shift, y_shift, gp[i].xsize, gp[i].ysize)
         non_nan_merge(U_map, gp[i].U, np.isnan(gp[i].U), x_shift, y_shift, gp[i].xsize, gp[i].ysize)
+        if plotting:
+            fig, ax = plt.subplots()  # Create a single figure and axis for the combined data
+            im = ax.imshow(self.data, vmin=np.nanpercentile(self.data, 10), vmax=np.nanpercentile(self.data, 90),
+                                 interpolation="nearest")
+            ax_divider = make_axes_locatable(ax)
+            cax = ax_divider.append_axes("right", size="7%", pad="5%")
+            fig.colorbar(im, cax=cax)
+            ax.set_title("data")
+            
+            output_dir='/gws/nopw/j04/nceo_geohazards_vol2/LiCS/temp/insar_proc/mnergizci/turkeyqi-master/decompose'
+            output_file = os.path.join(output_dir, 'plot.png')  # Modify 'self.output_dir' to your desired path
+            plt.savefig(output_file)
+            plt.close()  # Close the figure to free up memory
 
 
 if __name__ == "__main__":
@@ -167,7 +207,7 @@ if __name__ == "__main__":
     output_suffix = ""
     export_ve_vu = True
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-
+    sboi=True
     #################################################
     # Define vn, los, los_sigma directories and file formats here.#
     #################################################
@@ -191,19 +231,30 @@ if __name__ == "__main__":
     
     los_dir = "1.velmap_interseismic/range_referenced/"
     los_prefix, los_suffix = "", "_vel_GNSS_ref_frame.tif"
-    sigma_dir = "1.velmap_interseismic/range_referenced/"
-    sigma_preffix, sigma_suffix = "", ".vstd_scaled.geo.tif"
+    los_sigma_dir = "1.velmap_interseismic/range_referenced/"
+    los_sigma_preffix, los_sigma_suffix = "", ".vstd_scaled.geo.tif"
     flip_sign = False
-
+    
+    if sboi:
+        sboi_dir = "1.velmap_interseismic/sboi_referenced/"
+        sboi_prefix, sboi_suffix = "", "_vel_GNSS_ref_frame.tif"
+        sboi_sigma_dir = "1.velmap_interseismic/sboi_referenced/"
+        sboi_sigma_preffix, sboi_sigma_suffix = "", ".vstd_scaled.geo.tif"
+        
     #################################################
     # Define directory containing NEU coefs or incidence and heading angles in degrees
     #################################################
     angle_dir = los_dir
     NEU = True
     if NEU:
-        N_prefix, N_suffix = "", ".N.geo.tif"
-        E_prefix, E_suffix = "", ".E.geo.tif"
-        U_prefix, U_suffix = "", ".U.geo.tif"
+        los_N_prefix, los_N_suffix = "", ".N.geo.tif"
+        los_E_prefix, los_E_suffix = "", ".E.geo.tif"
+        los_U_prefix, los_U_suffix = "", ".U.geo.tif"
+        if sboi:
+            sboi_N_prefix, sboi_N_suffix = "", ".N.azi.geo.tif"
+            sboi_E_prefix, sboi_E_suffix = "", ".E.azi.geo.tif"
+            sboi_U_prefix, sboi_U_suffix = "", ".U.azi.geo.tif"
+            
     else:
         inc_prefix, inc_suffix = "", ".tif"
         head_prefix, head_suffix = "", ".tif"
@@ -231,55 +282,103 @@ if __name__ == "__main__":
     # Start running
     ####################################
     
-    # breakpoint()
     # group tracks into staggered layers to avoid conflict
-    asc_0 = {}
-    asc_1 = {}
-    dsc_0 = {}
-    dsc_1 = {}
-    print("loading asc_0...")
-    load_los_sigma_neu(asc_0, asc_0_list)
-    print("loading asc_1...")
-    load_los_sigma_neu(asc_1, asc_1_list)
-    print("loading dsc_0...")
-    load_los_sigma_neu(dsc_0, dsc_0_list)
-    print("loading dsc_1...")
-    load_los_sigma_neu(dsc_1, dsc_1_list)
+    los_asc_0 = {}
+    los_asc_1 = {}
+    los_dsc_0 = {}
+    los_dsc_1 = {}
+    sboi_asc_0 = {}
+    sboi_asc_1 = {}
+    sboi_dsc_0 = {}
+    sboi_dsc_1 = {}
+    
+    print("loading los_asc_0...")
+    load_los_sigma_neu(los_asc_0, asc_0_list)
+    print("loading los_asc_1...")
+    load_los_sigma_neu(los_asc_1, asc_1_list)
+    print("loading los_dsc_0...")
+    load_los_sigma_neu(los_dsc_0, dsc_0_list)
+    print("loading los_dsc_1...")
+    load_los_sigma_neu(los_dsc_1, dsc_1_list)
 
-    # remove vn contribution from asc and dsc los and sigma(los)
-    vn = OpenTif(vn_file, sigfile=sn_file)
-    for group in [asc_0, asc_1, dsc_0, dsc_1]:
-        print("remove vn from {}".format(group))
-        remove_vn_contribution_from_los_and_propagate_sigma_n_to_sigma_los(group, vn)
+    print("loading sboi_asc_0...")
+    load_los_sigma_neu(sboi_asc_0, asc_0_list, use_sboi=True)
+    print("loading sboi_asc_1...")
+    load_los_sigma_neu(sboi_asc_1, asc_1_list, use_sboi=True)
+    print("loading sboi_dsc_0...")
+    load_los_sigma_neu(sboi_dsc_0, dsc_0_list, use_sboi=True)
+    print("loading sboi_dsc_1...")
+    load_los_sigma_neu(sboi_dsc_1, dsc_1_list, use_sboi=True)
+
+    # # remove vn contribution from asc and dsc los and sigma(los)
+    # vn = OpenTif(vn_file, sigfile=sn_file)
+    # for group in [los_asc_0, los_asc_1, los_dsc_0, los_dsc_1]:
+    #     print("remove vn from {}".format(group))
+    #     remove_vn_contribution_from_los_and_propagate_sigma_n_to_sigma_los(group, vn)
 
     # define outer boundary of the data sets
-    maps = define_map_size(vn, asc_0, asc_1, dsc_0, dsc_1)
+    maps = define_map_size(vn, los_asc_0, los_asc_1, los_dsc_0, los_dsc_1, sboi_asc_0, sboi_asc_1, sboi_dsc_0, sboi_dsc_1)
 
-    # create 4x4 layers of empty map arrays to host input
-    logger.info("create 4x4 layers of empty map arrays to host input")
+    # create 4x4 layers of empty map arrays to host input for los
+    logger.info("create 4x4 layers of empty map arrays to host input for los")
     asc_los_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
     asc_los_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
     dsc_los_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
     dsc_los_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    asc_sig_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    asc_sig_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    dsc_sig_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    dsc_sig_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    asc_E_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    asc_E_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    dsc_E_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    dsc_E_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    asc_U_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    asc_U_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    dsc_U_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
-    dsc_U_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_sig_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_sig_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_sig_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_sig_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_N_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_N_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_N_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_N_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_E_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_E_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_E_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_E_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_U_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    asc_los_U_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_U_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    dsc_los_U_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+    
+    # create 4x4 layers of empty map arrays to host input for sboi
+    if sboi:
+        logger.info("create 4x4 layers of empty map arrays to host input for sboi")
+        asc_sboi_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_sig_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_sig_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_sig_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_sig_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_N_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_N_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_N_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_N_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_E_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_E_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_E_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_E_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        #no need
+        asc_sboi_U_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        asc_sboi_U_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_U_0 = np.ones((maps.ysize, maps.xsize)) * np.nan
+        dsc_sboi_U_1 = np.ones((maps.ysize, maps.xsize)) * np.nan
 
     # place groups of inputs in the right positions in the 4x4 layers of maps.
     logger.info("place groups of inputs in the right positions in the 4x4 layers of maps.")
-    input_track_los_sigma_E_U_to_map(asc_0, asc_los_0, asc_sig_0, asc_E_0, asc_U_0, maps)
-    input_track_los_sigma_E_U_to_map(asc_1, asc_los_1, asc_sig_1, asc_E_1, asc_U_1, maps)
-    input_track_los_sigma_E_U_to_map(dsc_0, dsc_los_0, dsc_sig_0, dsc_E_0, dsc_U_0, maps)
-    input_track_los_sigma_E_U_to_map(dsc_1, dsc_los_1, dsc_sig_1, dsc_E_1, dsc_U_1, maps)
+    input_track_los_sigma_N_E_U_to_map(los_asc_0, asc_los_0, asc_los_sig_0, asc_los_N_0, asc_los_E_0, asc_los_U_0, maps)
+    input_track_los_sigma_N_E_U_to_map(los_asc_1, asc_los_1, asc_los_sig_1, asc_los_N_1, asc_los_E_1, asc_los_U_1, maps)
+    input_track_los_sigma_N_E_U_to_map(los_dsc_0, dsc_los_0, dsc_los_sig_0, dsc_los_N_0, dsc_los_E_0, dsc_los_U_0, maps)
+    input_track_los_sigma_N_E_U_to_map(los_dsc_1, dsc_los_1, dsc_los_sig_1, dsc_los_N_1, dsc_los_E_1, dsc_los_U_1, maps)
+
+    if sboi:
+        input_track_los_sigma_N_E_U_to_map(sboi_asc_0, asc_sboi_0, asc_sboi_sig_0, asc_sboi_N_0, asc_sboi_E_0, asc_sboi_U_0, maps)
+        input_track_los_sigma_N_E_U_to_map(sboi_asc_1, asc_sboi_1, asc_sboi_sig_1, asc_sboi_N_1, asc_sboi_E_1, asc_sboi_U_1, maps)
+        input_track_los_sigma_N_E_U_to_map(sboi_dsc_0, dsc_sboi_0, dsc_sboi_sig_0, dsc_sboi_N_0, dsc_sboi_E_0, dsc_sboi_U_0, maps)
+        input_track_los_sigma_N_E_U_to_map(sboi_dsc_1, dsc_sboi_1, dsc_sboi_sig_1, dsc_sboi_N_1, dsc_sboi_E_1, dsc_sboi_U_1, maps)
 
     if predict_los:
         # turn one layer to nan
@@ -300,49 +399,185 @@ if __name__ == "__main__":
             d1los = copy.copy(dsc_los_1)
             dsc_los_1 = dsc_los_1 * np.nan
 
-    print("plotting...")
-    for map in [asc_los_0, asc_los_1, dsc_los_0, dsc_los_1, asc_sig_0, asc_sig_1, dsc_sig_0, dsc_sig_1,
-                asc_E_0, asc_E_1, dsc_E_0, dsc_E_1, asc_U_0, asc_U_1, dsc_U_0, dsc_U_1]:
-        plt.imshow(map, vmin=np.nanpercentile(map, 10), vmax=np.nanpercentile(map, 90))
-        plt.colorbar()
-        # plt.show()
-        plt.close()
-    # breakpoint()
+    # print("plotting...")
+    # for map in [asc_los_0, asc_los_1, dsc_los_0, dsc_los_1, asc_los_sig_0, asc_los_sig_1, dsc_los_sig_0, dsc_los_sig_1,
+    #             asc_los_N_0, asc_los_N_1, dsc_los_N_0, dsc_los_N_1, asc_los_E_0, asc_los_E_1, dsc_los_E_0, dsc_los_E_1, asc_los_U_0, asc_los_U_1, dsc_los_U_0, dsc_los_U_1]:
+    #     plt.imshow(map, vmin=np.nanpercentile(map, 10), vmax=np.nanpercentile(map, 90), interpolation="nearest")
+    #     plt.colorbar()
+    #     plt.show()
+    # if sboi:
+    #     for map in [asc_sboi_0, asc_sboi_1, dsc_sboi_0, dsc_sboi_1, asc_sboi_sig_0, asc_sboi_sig_1, dsc_sboi_sig_0, dsc_sboi_sig_1,
+    #                 asc_sboi_N_0, asc_sboi_N_1, dsc_sboi_N_0, dsc_sboi_N_1, asc_sboi_E_0, asc_sboi_E_1, dsc_sboi_E_0, dsc_sboi_E_1,
+    #                 asc_sboi_U_0, asc_sboi_U_1, dsc_sboi_U_0, dsc_sboi_U_1]:
+    #         plt.imshow(map, vmin=np.nanpercentile(map, 10), vmax=np.nanpercentile(map, 90), interpolation="nearest")
+    #         plt.colorbar()
+    #         plt.show()
+        # plt.close()
+    #breakpoint()
 
     # flatten the 2D maps into 1D arrays for inversion
     asc_los_0_flat = asc_los_0.flatten()
     asc_los_1_flat = asc_los_1.flatten()
     dsc_los_0_flat = dsc_los_0.flatten()
     dsc_los_1_flat = dsc_los_1.flatten()
+    if sboi:
+        asc_sboi_0_flat = asc_sboi_0.flatten()
+        asc_sboi_1_flat = asc_sboi_1.flatten()
+        dsc_sboi_0_flat = dsc_sboi_0.flatten()
+        dsc_sboi_1_flat = dsc_sboi_1.flatten()
+    
+    if sboi:
+        # mask only pixels with at least one asc and at least one dsc in the 4 layers.
+        layers= [asc_sboi_0, asc_sboi_1, dsc_sboi_0, dsc_sboi_1]    
+        mask_3D = np.logical_and(must_have([asc_los_0, asc_los_1, dsc_los_0, dsc_los_1], 2), must_have(layers, 1))
+
+    
     # mask only pixels with at least one asc and at least one dsc in the 4 layers.
-    mask_test = np.logical_and(np.logical_or(~np.isnan(asc_los_0_flat), ~np.isnan(asc_los_1_flat)),
+    mask_2D = np.logical_and(np.logical_or(~np.isnan(asc_los_0_flat), ~np.isnan(asc_los_1_flat)),
                                np.logical_or(~np.isnan(dsc_los_0_flat), ~np.isnan(dsc_los_1_flat)))
-    # select elements from the 4x4 layers which have enough data to enter inversion.
-    asc_los_0_mask = asc_los_0_flat[mask_test]
-    asc_los_1_mask = asc_los_1_flat[mask_test]
-    dsc_los_0_mask = dsc_los_0_flat[mask_test]
-    dsc_los_1_mask = dsc_los_1_flat[mask_test]
-    asc_sig_0_mask = asc_sig_0.flatten()[mask_test]
-    asc_sig_1_mask = asc_sig_1.flatten()[mask_test]
-    dsc_sig_0_mask = dsc_sig_0.flatten()[mask_test]
-    dsc_sig_1_mask = dsc_sig_1.flatten()[mask_test]
-    asc_E_0_mask = asc_E_0.flatten()[mask_test]
-    asc_E_1_mask = asc_E_1.flatten()[mask_test]
-    dsc_E_0_mask = dsc_E_0.flatten()[mask_test]
-    dsc_E_1_mask = dsc_E_1.flatten()[mask_test]
-    asc_U_0_mask = asc_U_0.flatten()[mask_test]
-    asc_U_1_mask = asc_U_1.flatten()[mask_test]
-    dsc_U_0_mask = dsc_U_0.flatten()[mask_test]
-    dsc_U_1_mask = dsc_U_1.flatten()[mask_test]
+    if sboi:
+        mask_2D[mask_3D] = False
+        #los
+        asc_los_0_mask = asc_los_0_flat[mask_3D]
+        asc_los_1_mask = asc_los_1_flat[mask_3D]
+        dsc_los_0_mask = dsc_los_0_flat[mask_3D]
+        dsc_los_1_mask = dsc_los_1_flat[mask_3D]
+        asc_los_sig_0_mask = asc_los_sig_0.flatten()[mask_3D]
+        asc_los_sig_1_mask = asc_los_sig_1.flatten()[mask_3D]
+        dsc_los_sig_0_mask = dsc_los_sig_0.flatten()[mask_3D]
+        dsc_los_sig_1_mask = dsc_los_sig_1.flatten()[mask_3D]
+        asc_los_N_0_mask = asc_los_N_0.flatten()[mask_3D]
+        asc_los_N_1_mask = asc_los_N_1.flatten()[mask_3D]
+        dsc_los_N_0_mask = dsc_los_N_0.flatten()[mask_3D]
+        dsc_los_N_1_mask = dsc_los_N_1.flatten()[mask_3D]
+        asc_los_E_0_mask = asc_los_E_0.flatten()[mask_3D]
+        asc_los_E_1_mask = asc_los_E_1.flatten()[mask_3D]
+        dsc_los_E_0_mask = dsc_los_E_0.flatten()[mask_3D]
+        dsc_los_E_1_mask = dsc_los_E_1.flatten()[mask_3D]
+        asc_los_U_0_mask = asc_los_U_0.flatten()[mask_3D]
+        asc_los_U_1_mask = asc_los_U_1.flatten()[mask_3D]
+        dsc_los_U_0_mask = dsc_los_U_0.flatten()[mask_3D]
+        dsc_los_U_1_mask = dsc_los_U_1.flatten()[mask_3D]
+        #sboi
+        asc_sboi_0_mask = asc_sboi_0_flat[mask_3D]
+        asc_sboi_1_mask = asc_sboi_1_flat[mask_3D]
+        dsc_sboi_0_mask = dsc_sboi_0_flat[mask_3D]
+        dsc_sboi_1_mask = dsc_sboi_1_flat[mask_3D]
+        asc_sboi_sig_0_mask = asc_sboi_sig_0.flatten()[mask_3D]
+        asc_sboi_sig_1_mask = asc_sboi_sig_1.flatten()[mask_3D]
+        dsc_sboi_sig_0_mask = dsc_sboi_sig_0.flatten()[mask_3D]
+        dsc_sboi_sig_1_mask = dsc_sboi_sig_1.flatten()[mask_3D]
+        asc_sboi_N_0_mask = asc_sboi_N_0.flatten()[mask_3D]
+        asc_sboi_N_1_mask = asc_sboi_N_1.flatten()[mask_3D]
+        dsc_sboi_N_0_mask = dsc_sboi_N_0.flatten()[mask_3D]
+        dsc_sboi_N_1_mask = dsc_sboi_N_1.flatten()[mask_3D]
+        asc_sboi_E_0_mask = asc_sboi_E_0.flatten()[mask_3D]
+        asc_sboi_E_1_mask = asc_sboi_E_1.flatten()[mask_3D]
+        dsc_sboi_E_0_mask = dsc_sboi_E_0.flatten()[mask_3D]
+        dsc_sboi_E_1_mask = dsc_sboi_E_1.flatten()[mask_3D]
+        asc_sboi_U_0_mask = asc_sboi_U_0.flatten()[mask_3D]
+        asc_sboi_U_1_mask = asc_sboi_U_1.flatten()[mask_3D]
+        dsc_sboi_U_0_mask = dsc_sboi_U_0.flatten()[mask_3D]
+        dsc_sboi_U_1_mask = dsc_sboi_U_1.flatten()[mask_3D]
+        ve_3D_mask = []
+        vn_3D_mask = []  # Add North velocity
+        vu_3D_mask = []
+        ve_3D_sig_mask = []
+        vn_3D_sig_mask = []  # Add sigma for North velocity
+        vu_3D_sig_mask = []
+    
+        # LOS = Ve * E + Vn * N +  Vu * U for 3D inversion
+        # # inversion starts
+        length = len(asc_los_0_mask)
+        logger.info("3D inversion starts in SBOIs .... total {} pixels".format(length))
+        c = 1
+        for la0, la1, ld0, ld1, lasig0, lasig1, ldsig0, ldsig1, \
+            Gae0, Gae1, Gde0, Gde1, \
+            Gan0, Gan1, Gdn0, Gdn1, \
+            Gau0, Gau1, Gdu0, Gdu1 in \
+                zip(asc_los_0_mask, asc_los_1_mask, dsc_los_0_mask, dsc_los_1_mask,
+                    asc_los_sig_0_mask, asc_los_sig_1_mask, dsc_los_sig_0_mask, dsc_los_sig_1_mask,
+                    asc_sboi_E_0_mask, asc_sboi_E_1_mask, dsc_sboi_E_0_mask, dsc_sboi_E_1_mask,
+                    asc_sboi_N_0_mask, asc_sboi_N_1_mask, dsc_sboi_N_0_mask, dsc_sboi_N_1_mask,
+                    asc_sboi_U_0_mask, asc_sboi_U_1_mask, dsc_sboi_U_0_mask, dsc_sboi_U_1_mask):
 
+
+            d = np.array([[la0], [la1], [ld0], [ld1]])
+            G = np.array([[Gae0, Gau0], [Gae1, Gau1], [Gde0, Gdu0], [Gde1, Gdu1]])
+            sig = np.array([[lasig0], [lasig1], [ldsig0], [ldsig1]])
+            sig[np.isnan(sig)] = 1 # in case there are empty sigma values where velocity have values
+            sig = sig[~np.isnan(d).any(axis=1)]
+            G = G[~np.isnan(d).any(axis=1)]
+            d = d[~np.isnan(d).any(axis=1)]
+            if len(d) != len(G) or len(d) != len(sig):
+                raise Warning("pixel inversion inputs have unequal dimensions...")
+            [[e], [u]] = np.linalg.lstsq(G/sig, d/sig, rcond=None)[0]
+            cov_d = np.diag(np.square(sig).transpose()[0])
+            # cov_m = np.linalg.inv(np.dot(np.dot(G.transpose(), np.linalg.inv(cov_d)), G))
+            cov_m = np.linalg.pinv(G.T @ np.linalg.pinv(cov_d) @ G)
+            if c % (length//100) == 0:
+                logger.info("{}, {:.2f}%, {}, {}".format(c, c/length*100, e, u))
+            ve_3D_mask.append(e)
+            vu_3D_mask.append(u)
+            ve_3D_sig_mask.append(np.sqrt(cov_m[0, 0]))
+            vu_3D_sig_mask.append(np.sqrt(cov_m[1, 1]))
+            c = c+1
+
+        print('done with pixel wise inversion')
+
+        # create empty 1D arrays to register inversion results
+        length = len(asc_los_0_flat)
+        ve_flat = np.ones(length) * np.nan
+        vu_flat = np.ones(length) * np.nan
+        ve_sig_flat = np.ones(length) * np.nan
+        vu_sig_flat = np.ones(length) * np.nan
+        # populate the masked pixels of the full flat arrays with inversion results
+        ve_flat[mask_2D] = ve_2D_mask
+        vu_flat[mask_2D] = vu_2D_mask
+        ve_sig_flat[mask_2D] = ve_2D_sig_mask
+        vu_sig_flat[mask_2D] = vu_2D_sig_mask
+        # reshape the flat arrays into maps
+        ve = ve_flat.reshape((maps.ysize, maps.xsize))
+        vu = vu_flat.reshape((maps.ysize, maps.xsize))
+        ve_sig = ve_sig_flat.reshape((maps.ysize, maps.xsize))
+        vu_sig = vu_sig_flat.reshape((maps.ysize, maps.xsize))
+
+
+
+
+
+
+
+
+
+
+    # # 2D mask velocity solution
+    # # select elements from the 4x4 layers which have enough data to enter inversion.
+    # asc_los_0_mask = asc_los_0_flat[mask_2D]
+    # asc_los_1_mask = asc_los_1_flat[mask_2D]
+    # dsc_los_0_mask = dsc_los_0_flat[mask_2D]
+    # dsc_los_1_mask = dsc_los_1_flat[mask_2D]
+    # asc_los_sig_0_mask = asc_los_sig_0.flatten()[mask_2D]
+    # asc_los_sig_1_mask = asc_los_sig_1.flatten()[mask_2D]
+    # dsc_los_sig_0_mask = dsc_los_sig_0.flatten()[mask_2D]
+    # dsc_los_sig_1_mask = dsc_los_sig_1.flatten()[mask_2D]
+    # asc_los_E_0_mask = asc_los_E_0.flatten()[mask_2D]
+    # asc_los_E_1_mask = asc_los_E_1.flatten()[mask_2D]
+    # dsc_los_E_0_mask = dsc_los_E_0.flatten()[mask_2D]
+    # dsc_los_E_1_mask = dsc_los_E_1.flatten()[mask_2D]
+    # asc_los_U_0_mask = asc_los_U_0.flatten()[mask_2D]
+    # asc_los_U_1_mask = asc_los_U_1.flatten()[mask_2D]
+    # dsc_los_U_0_mask = dsc_los_U_0.flatten()[mask_2D]
+    # dsc_los_U_1_mask = dsc_los_U_1.flatten()[mask_2D]
+    
     # empty lists to register inversion results
-    ve_mask = []
-    vu_mask = []
-    ve_sig_mask = []
-    vu_sig_mask = []
+    ve_2D_mask = []
+    vu_2D_mask = []
+    ve_2D_sig_mask = []
+    vu_2D_sig_mask = []
+    
 
-    # LOS = Ve * E + Vu * U
-
+    # LOS = Ve * E + Vu * U for 2D inversion
     # # inversion starts
     length = len(asc_los_0_mask)
     logger.info("inversion starts...total {} pixels".format(length))
@@ -350,9 +585,9 @@ if __name__ == "__main__":
     for la0, la1, ld0, ld1, lasig0, lasig1, ldsig0, ldsig1, \
         Gae0, Gae1, Gde0, Gde1, Gau0, Gau1, Gdu0, Gdu1 in \
             zip(asc_los_0_mask, asc_los_1_mask, dsc_los_0_mask, dsc_los_1_mask,
-                asc_sig_0_mask, asc_sig_1_mask, dsc_sig_0_mask, dsc_sig_1_mask,
-                asc_E_0_mask,   asc_E_1_mask,   dsc_E_0_mask,   dsc_E_1_mask,
-                asc_U_0_mask,   asc_U_1_mask,   dsc_U_0_mask,   dsc_U_1_mask):
+                asc_los_sig_0_mask, asc_los_sig_1_mask, dsc_los_sig_0_mask, dsc_los_sig_1_mask,
+                asc_los_E_0_mask,   asc_los_E_1_mask,   dsc_los_E_0_mask,   dsc_los_E_1_mask,
+                asc_los_U_0_mask,   asc_los_U_1_mask,   dsc_los_U_0_mask,   dsc_los_U_1_mask):
 
         d = np.array([[la0], [la1], [ld0], [ld1]])
         G = np.array([[Gae0, Gau0], [Gae1, Gau1], [Gde0, Gdu0], [Gde1, Gdu1]])
@@ -365,13 +600,14 @@ if __name__ == "__main__":
             raise Warning("pixel inversion inputs have unequal dimensions...")
         [[e], [u]] = np.linalg.lstsq(G/sig, d/sig, rcond=None)[0]
         cov_d = np.diag(np.square(sig).transpose()[0])
-        cov_m = np.linalg.inv(np.dot(np.dot(G.transpose(), np.linalg.inv(cov_d)), G))
+        # cov_m = np.linalg.inv(np.dot(np.dot(G.transpose(), np.linalg.inv(cov_d)), G))
+        cov_m = np.linalg.pinv(G.T @ np.linalg.pinv(cov_d) @ G)
         if c % (length//100) == 0:
             logger.info("{}, {:.2f}%, {}, {}".format(c, c/length*100, e, u))
-        ve_mask.append(e)
-        vu_mask.append(u)
-        ve_sig_mask.append(np.sqrt(cov_m[0, 0]))
-        vu_sig_mask.append(np.sqrt(cov_m[1, 1]))
+        ve_2D_mask.append(e)
+        vu_2D_mask.append(u)
+        ve_2D_sig_mask.append(np.sqrt(cov_m[0, 0]))
+        vu_2D_sig_mask.append(np.sqrt(cov_m[1, 1]))
         c = c+1
 
     print('done with pixel wise inversion')
@@ -383,10 +619,10 @@ if __name__ == "__main__":
     ve_sig_flat = np.ones(length) * np.nan
     vu_sig_flat = np.ones(length) * np.nan
     # populate the masked pixels of the full flat arrays with inversion results
-    ve_flat[mask_test] = ve_mask
-    vu_flat[mask_test] = vu_mask
-    ve_sig_flat[mask_test] = ve_sig_mask
-    vu_sig_flat[mask_test] = vu_sig_mask
+    ve_flat[mask_2D] = ve_2D_mask
+    vu_flat[mask_2D] = vu_2D_mask
+    ve_sig_flat[mask_2D] = ve_2D_sig_mask
+    vu_sig_flat[mask_2D] = vu_2D_sig_mask
     # reshape the flat arrays into maps
     ve = ve_flat.reshape((maps.ysize, maps.xsize))
     vu = vu_flat.reshape((maps.ysize, maps.xsize))
@@ -399,7 +635,7 @@ if __name__ == "__main__":
         plt.suptitle("LOS_diff"+output_suffix)
         # back calculate removed los and compare differences
         if noA1:
-            asc_los_0 = ve * asc_E_0 + vu * asc_U_0
+            asc_los_0 = ve * asc_los_E_0 + vu * asc_los_U_0
             asc_los_0_diff = a0los - asc_los_0
             asc_los_0_std = np.nanstd(asc_los_0_diff)
             # plot
@@ -413,7 +649,7 @@ if __name__ == "__main__":
             export_tif(asc_los_0_diff, maps, output_dir + 'a1_diff{}.tif'.format(output_suffix))
 
         if noA2:
-            asc_los_1 = ve * asc_E_1 + vu * asc_U_1
+            asc_los_1 = ve * asc_los_E_1 + vu * asc_los_U_1
             asc_los_1_diff = a1los - asc_los_1
             asc_los_1_std = np.nanstd(asc_los_1_diff)
             # plot
@@ -427,7 +663,7 @@ if __name__ == "__main__":
             export_tif(asc_los_1_diff, maps, output_dir + 'a2_diff{}.tif'.format(output_suffix))
 
         if noD1:
-            dsc_los_0 = ve * dsc_E_0 + vu * dsc_U_0
+            dsc_los_0 = ve * dsc_los_E_0 + vu * dsc_los_U_0
             dsc_los_0_diff = d0los - dsc_los_0
             dsc_los_0_std = np.nanstd(dsc_los_0_diff)
             # plot
@@ -441,7 +677,7 @@ if __name__ == "__main__":
             export_tif(dsc_los_0_diff, maps, output_dir + 'd1_diff{}.tif'.format(output_suffix))
 
         if noD2:
-            dsc_los_1 = ve * dsc_E_1 + vu * dsc_U_1
+            dsc_los_1 = ve * dsc_los_E_1 + vu * dsc_los_U_1
             dsc_los_1_diff = d1los - dsc_los_1
             dsc_los_1_std = np.nanstd(dsc_los_1_diff)
             # plot
